@@ -7,19 +7,33 @@ export default function DxfViewer() {
   useEffect(() => {
     async function loadDXF() {
       const response = await fetch("/trench.dxf");
+      if (!response.ok) {
+        console.error("Fetch failed:", response.status, response.statusText);
+        return;
+      }
       const text = await response.text();
+      console.log("Fetched text length:", text.length);
 
       const parser = new DxfParser();
       let dxf;
 
       try {
-        dxf = parser.parseSync(text);
+        dxf = await parser.parse(text);
+        console.log("Parsed DXF:", dxf);
       } catch (err) {
         console.error("DXF parse error:", err);
         return;
       }
 
       const entities = dxf.entities || [];
+      console.log("Entities:", entities);
+      console.log("Number of entities:", entities.length);
+
+      const entityTypes = {};
+      entities.forEach(e => {
+        entityTypes[e.type] = (entityTypes[e.type] || 0) + 1;
+      });
+      console.log("Entity types:", entityTypes);
       const canvas = canvasRef.current;
       const ctx = canvas.getContext("2d");
 
@@ -35,18 +49,23 @@ export default function DxfViewer() {
         maxX = -Infinity,
         maxY = -Infinity;
 
+      let lineCount = 0;
       entities.forEach((e) => {
-        if (e.type === "LINE") {
+        if (e.type === "LINE" && e.start && e.end) {
+          lineCount++;
           minX = Math.min(minX, e.start.x, e.end.x);
           minY = Math.min(minY, e.start.y, e.end.y);
           maxX = Math.max(maxX, e.start.x, e.end.x);
           maxY = Math.max(maxY, e.start.y, e.end.y);
         }
       });
+      console.log("LINE entities with start/end:", lineCount);
 
       const dx = maxX - minX;
       const dy = maxY - minY;
+      console.log("Bounds: minX=", minX, "maxX=", maxX, "minY=", minY, "maxY=", maxY, "dx=", dx, "dy=", dy);
       const scale = Math.min(canvas.width / dx, canvas.height / dy) * 0.9;
+      console.log("Scale:", scale);
 
       const offsetX = (canvas.width - dx * scale) / 2;
       const offsetY = (canvas.height - dy * scale) / 2;
@@ -60,7 +79,7 @@ export default function DxfViewer() {
 
       ctx.beginPath();
       entities.forEach((e) => {
-        if (e.type === "LINE") {
+        if (e.type === "LINE" && e.start && e.end) {
           const s = toScreen(e.start.x, e.start.y);
           const t = toScreen(e.end.x, e.end.y);
           ctx.moveTo(s.x, s.y);

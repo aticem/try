@@ -1,6 +1,6 @@
 import "./App.css";
-import DxfViewer from "./components/DxfViewer";
+import Map from "./components/Map";
 
 export default function App() {
-  return <DxfViewer />;
+  return <Map />;
 }
