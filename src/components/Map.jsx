@@ -147,37 +147,135 @@ const lineIntersectsBounds = (coordinates, bounds) => {
 };
 
 // Selection Box Component
-function SelectionBox({ onSelectionComplete, visibleLayersRef, geoJsonData, setSelectedBounds }) {
+function SelectionBox({ mode, onSelectionComplete, onUnselectionComplete, onMeasurementComplete, onMeasurementUnselect, visibleLayersRef, geoJsonData, setSelectedBounds, selectedSegments, setSelectedSegments, measurementSegments }) {
   const [isSelecting, setIsSelecting] = useState(false);
+  const [isUnselecting, setIsUnselecting] = useState(false); // Right-click unselect mode
   const [startPoint, setStartPoint] = useState(null);
   const [currentPoint, setCurrentPoint] = useState(null);
   const selectionRectRef = useRef(null);
 
+  // Check if a point on the line is already selected
+  const isPointAlreadySelected = (coord, segments) => {
+    const epsilon = 0.00000001; // Small tolerance for floating point comparison
+    for (const seg of segments) {
+      // Check if point is on or very close to this selected segment
+      const [x, y] = coord;
+      const [x1, y1] = seg.start;
+      const [x2, y2] = seg.end;
+      
+      // Check if point is between start and end (with some tolerance)
+      const minX = Math.min(x1, x2) - epsilon;
+      const maxX = Math.max(x1, x2) + epsilon;
+      const minY = Math.min(y1, y2) - epsilon;
+      const maxY = Math.max(y1, y2) + epsilon;
+      
+      if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+        // Check if point is on the line segment
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < epsilon) {
+          // Segment is a point
+          if (Math.abs(x - x1) < epsilon && Math.abs(y - y1) < epsilon) {
+            return true;
+          }
+        } else {
+          // Calculate distance from point to line
+          const t = Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / (len * len)));
+          const projX = x1 + t * dx;
+          const projY = y1 + t * dy;
+          const dist = Math.sqrt((x - projX) * (x - projX) + (y - projY) * (y - projY));
+          if (dist < epsilon) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  // Check if a segment overlaps with already selected segments and return non-overlapping parts
+  const getUnselectedPortion = (clippedStart, clippedEnd, segments) => {
+    // Simplified: if either endpoint is already selected, skip this segment
+    // For more precision, we'd need to split segments
+    const startSelected = isPointAlreadySelected(clippedStart, segments);
+    const endSelected = isPointAlreadySelected(clippedEnd, segments);
+    
+    if (startSelected && endSelected) {
+      return null; // Entire segment already selected
+    }
+    
+    // For now, return the full clipped segment if any part is new
+    return { start: clippedStart, end: clippedEnd };
+  };
+
+  // Check if two segments overlap (for unselection)
+  const segmentsOverlap = (seg1Start, seg1End, seg2) => {
+    const epsilon = 0.0000001;
+    const [x1, y1] = seg1Start;
+    const [x2, y2] = seg1End;
+    const [sx1, sy1] = seg2.start;
+    const [sx2, sy2] = seg2.end;
+    
+    // Check if the segments are on the same line and overlap
+    // Simplified: check if any endpoint of one segment is on/near the other
+    const isNear = (px, py, ax, ay, bx, by) => {
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < epsilon) return Math.abs(px - ax) < epsilon && Math.abs(py - ay) < epsilon;
+      
+      const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (len * len)));
+      const projX = ax + t * dx;
+      const projY = ay + t * dy;
+      const dist = Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY));
+      return dist < epsilon;
+    };
+    
+    return isNear(x1, y1, sx1, sy1, sx2, sy2) || 
+           isNear(x2, y2, sx1, sy1, sx2, sy2) ||
+           isNear(sx1, sy1, x1, y1, x2, y2) ||
+           isNear(sx2, sy2, x1, y1, x2, y2);
+  };
+
   const map = useMapEvents({
     mousedown: (e) => {
-      // Only start selection on left mouse button
+      // Left click = select/measure, Right click = unselect (works in both modes)
       if (e.originalEvent.button === 0) {
         setIsSelecting(true);
+        setIsUnselecting(false);
         setStartPoint(e.latlng);
         setCurrentPoint(e.latlng);
-        
-        // Disable map dragging during selection
+        map.dragging.disable();
+      } else if (e.originalEvent.button === 2) {
+        // Right click unselect works in both modes
+        setIsUnselecting(true);
+        setIsSelecting(false);
+        setStartPoint(e.latlng);
+        setCurrentPoint(e.latlng);
         map.dragging.disable();
       }
     },
     mousemove: (e) => {
-      if (isSelecting && startPoint) {
+      if ((isSelecting || isUnselecting) && startPoint) {
         setCurrentPoint(e.latlng);
         
         // Update or create selection rectangle
         const bounds = L.latLngBounds(startPoint, e.latlng);
+        let boxColor = '#0066ff'; // Default blue for marking
+        if (isUnselecting) {
+          boxColor = '#ff0000'; // Red for unselect (both modes)
+        } else if (mode === 'measurement') {
+          boxColor = '#FFA500'; // Orange for measurement
+        }
+        
         if (selectionRectRef.current) {
           selectionRectRef.current.setBounds(bounds);
         } else {
           selectionRectRef.current = L.rectangle(bounds, {
-            color: '#0066ff',
+            color: boxColor,
             weight: 2,
-            fillColor: '#0066ff',
+            fillColor: boxColor,
             fillOpacity: 0.2,
             dashArray: '5, 5'
           }).addTo(map);
@@ -185,31 +283,139 @@ function SelectionBox({ onSelectionComplete, visibleLayersRef, geoJsonData, setS
       }
     },
     mouseup: (e) => {
-      if (isSelecting && startPoint) {
+      if ((isSelecting || isUnselecting) && startPoint) {
         const bounds = L.latLngBounds(startPoint, e.latlng);
+        const boundsObj = {
+          south: bounds.getSouth(),
+          north: bounds.getNorth(),
+          west: bounds.getWest(),
+          east: bounds.getEast()
+        };
         
-        // Calculate total length inside the selection box
-        let totalLengthInside = 0;
-        
-        if (geoJsonData.trenchLine) {
-          geoJsonData.trenchLine.features.forEach((feature, index) => {
-            if (feature.properties && feature.properties.layer === "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR") {
-              const lengthInside = calculateLengthInsideBounds(feature.geometry.coordinates, bounds);
-              totalLengthInside += lengthInside;
-            }
-          });
-        }
-        
-        // Call the completion handler with the length inside the box
-        if (totalLengthInside > 0) {
-          onSelectionComplete(totalLengthInside);
-          // Save the bounds for green overlay
-          setSelectedBounds(prev => [...prev, {
-            south: bounds.getSouth(),
-            north: bounds.getNorth(),
-            west: bounds.getWest(),
-            east: bounds.getEast()
-          }]);
+        if (isUnselecting) {
+          // UNSELECT MODE - Remove both marking segments and measurement segments inside the box
+          let totalLengthRemoved = 0;
+          const markingSegmentsToRemove = [];
+          const measurementIndicesToRemove = [];
+          
+          if (geoJsonData.trenchLine) {
+            geoJsonData.trenchLine.features.forEach((feature, featureIndex) => {
+              if (feature.properties && feature.properties.layer === "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR") {
+                const coords = feature.geometry.coordinates;
+                
+                for (let i = 0; i < coords.length - 1; i++) {
+                  const coord1 = coords[i];
+                  const coord2 = coords[i + 1];
+                  
+                  // Clip line to bounds
+                  const clipped = clipLineToBounds(coord1, coord2, boundsObj);
+                  
+                  if (clipped) {
+                    // Find and mark marking segments that overlap with this clipped portion
+                    selectedSegments.forEach((seg, idx) => {
+                      if (segmentsOverlap(clipped[0], clipped[1], seg)) {
+                        if (!markingSegmentsToRemove.includes(idx)) {
+                          markingSegmentsToRemove.push(idx);
+                          totalLengthRemoved += calculateDistance(seg.start, seg.end);
+                        }
+                      }
+                    });
+                    
+                    // Find and mark measurement segments that overlap with this clipped portion
+                    measurementSegments.forEach((measurement, mIdx) => {
+                      measurement.segments.forEach((seg) => {
+                        if (segmentsOverlap(clipped[0], clipped[1], seg)) {
+                          if (!measurementIndicesToRemove.includes(mIdx)) {
+                            measurementIndicesToRemove.push(mIdx);
+                          }
+                        }
+                      });
+                    });
+                  }
+                }
+              }
+            });
+          }
+          
+          // Remove marking segments
+          if (totalLengthRemoved > 0 && markingSegmentsToRemove.length > 0) {
+            onUnselectionComplete(totalLengthRemoved, markingSegmentsToRemove);
+          }
+          
+          // Remove measurement segments
+          if (measurementIndicesToRemove.length > 0) {
+            onMeasurementUnselect(measurementIndicesToRemove);
+          }
+        } else if (mode === 'measurement') {
+          // MEASUREMENT MODE - Just measure and display, don't add to completed
+          let totalLengthInside = 0;
+          const newMeasurementSegments = [];
+          
+          if (geoJsonData.trenchLine) {
+            geoJsonData.trenchLine.features.forEach((feature, featureIndex) => {
+              if (feature.properties && feature.properties.layer === "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR") {
+                const coords = feature.geometry.coordinates;
+                
+                for (let i = 0; i < coords.length - 1; i++) {
+                  const coord1 = coords[i];
+                  const coord2 = coords[i + 1];
+                  
+                  // Clip line to bounds
+                  const clipped = clipLineToBounds(coord1, coord2, boundsObj);
+                  
+                  if (clipped) {
+                    const clippedLength = calculateDistance(clipped[0], clipped[1]);
+                    totalLengthInside += clippedLength;
+                    newMeasurementSegments.push({ start: clipped[0], end: clipped[1] });
+                  }
+                }
+              }
+            });
+          }
+          
+          if (totalLengthInside > 0) {
+            onMeasurementComplete(totalLengthInside, newMeasurementSegments, boundsObj);
+          }
+        } else {
+          // MARKING SELECT MODE - Add segments that are inside the box
+          let totalLengthInside = 0;
+          const newSelectedSegments = [];
+          
+          if (geoJsonData.trenchLine) {
+            geoJsonData.trenchLine.features.forEach((feature, featureIndex) => {
+              if (feature.properties && feature.properties.layer === "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR") {
+                const coords = feature.geometry.coordinates;
+                
+                for (let i = 0; i < coords.length - 1; i++) {
+                  const coord1 = coords[i];
+                  const coord2 = coords[i + 1];
+                  
+                  // Clip line to bounds
+                  const clipped = clipLineToBounds(coord1, coord2, boundsObj);
+                  
+                  if (clipped) {
+                    // Check if this clipped portion overlaps with already selected segments
+                    const unselected = getUnselectedPortion(clipped[0], clipped[1], selectedSegments);
+                    
+                    if (unselected) {
+                      const clippedLength = calculateDistance(unselected.start, unselected.end);
+                      totalLengthInside += clippedLength;
+                      newSelectedSegments.push(unselected);
+                    }
+                  }
+                }
+              }
+            });
+          }
+          
+          // Call the completion handler with the length inside the box (only new segments)
+          if (totalLengthInside > 0) {
+            onSelectionComplete(totalLengthInside);
+            // Save the bounds for potential future use
+            setSelectedBounds(prev => [...prev, boundsObj]);
+            // Add new selected segments
+            setSelectedSegments(prev => [...prev, ...newSelectedSegments]);
+          }
         }
         
         // Clean up
@@ -219,12 +425,17 @@ function SelectionBox({ onSelectionComplete, visibleLayersRef, geoJsonData, setS
         }
         
         setIsSelecting(false);
+        setIsUnselecting(false);
         setStartPoint(null);
         setCurrentPoint(null);
         
         // Re-enable map dragging
         map.dragging.enable();
       }
+    },
+    contextmenu: (e) => {
+      // Prevent default context menu
+      e.originalEvent.preventDefault();
     }
   });
 
@@ -236,6 +447,11 @@ export default function Map() {
   const [completedLength, setCompletedLength] = useState(0);
   const [totalLength, setTotalLength] = useState(0);
   const [selectedBounds, setSelectedBounds] = useState([]); // Array of bounds that have been selected
+  const [selectedSegments, setSelectedSegments] = useState([]); // Array of {start: [lng, lat], end: [lng, lat]} for green overlay
+  const [measurementSegments, setMeasurementSegments] = useState([]); // Array of {segments: [...], length: number} for yellow measurement overlay
+  const [history, setHistory] = useState([]); // For undo - stores previous states
+  const [redoStack, setRedoStack] = useState([]); // For redo - stores undone states
+  const [mode, setMode] = useState('marking'); // 'marking' or 'measurement'
   const visibleLayersRef = useRef({});
   const mapRef = useRef(null);
 
@@ -287,61 +503,180 @@ export default function Map() {
 
   // Handle selection box completion - add length inside the box
   const handleSelectionComplete = useCallback((lengthInside) => {
+    // Save current state to history before making changes
+    setHistory(prev => [...prev, { completedLength, selectedBounds, selectedSegments: [...selectedSegments] }]);
+    setRedoStack([]); // Clear redo stack on new action
+    
     setCompletedLength(prev => {
       const newCompleted = prev + lengthInside;
       // Don't exceed total length
       return Math.min(newCompleted, totalLength);
     });
-  }, [totalLength]);
+  }, [totalLength, completedLength, selectedBounds, selectedSegments]);
 
-  // Create GeoJSON for selected (green) segments based on selectedBounds
-  // This clips the lines precisely to show only the parts inside the selection boxes
-  const selectedGeoJson = useCallback(() => {
-    if (!geoJsonData.trenchLine || selectedBounds.length === 0) return null;
+  // Handle unselection - remove length from completed
+  const handleUnselectionComplete = useCallback((lengthRemoved, segmentIndicesToRemove) => {
+    // Save current state to history before making changes
+    setHistory(prev => [...prev, { completedLength, selectedBounds, selectedSegments: [...selectedSegments] }]);
+    setRedoStack([]); // Clear redo stack on new action
     
-    const selectedFeatures = [];
+    // Remove segments by index
+    setSelectedSegments(prev => prev.filter((_, idx) => !segmentIndicesToRemove.includes(idx)));
     
-    geoJsonData.trenchLine.features.forEach((feature) => {
-      if (feature.properties && feature.properties.layer === "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR") {
-        const coords = feature.geometry.coordinates;
-        
-        // For each segment, clip it to each selected bounds
-        for (let i = 0; i < coords.length - 1; i++) {
-          const coord1 = coords[i];
-          const coord2 = coords[i + 1];
-          
-          for (const bounds of selectedBounds) {
-            const clipped = clipLineToBounds(coord1, coord2, bounds);
-            
-            if (clipped) {
-              // Add the clipped segment as a green line
-              selectedFeatures.push({
-                type: "Feature",
-                properties: {},
-                geometry: {
-                  type: "LineString",
-                  coordinates: clipped
-                }
-              });
-            }
-          }
+    setCompletedLength(prev => {
+      const newCompleted = prev - lengthRemoved;
+      // Don't go below 0
+      return Math.max(0, newCompleted);
+    });
+  }, [completedLength, selectedBounds, selectedSegments]);
+
+  // Handle measurement complete - show yellow overlay with length label
+  const handleMeasurementComplete = useCallback((length, segments, bounds) => {
+    // Calculate center of the measured segments for label placement
+    let sumLat = 0, sumLng = 0, count = 0;
+    segments.forEach(seg => {
+      sumLng += (seg.start[0] + seg.end[0]) / 2;
+      sumLat += (seg.start[1] + seg.end[1]) / 2;
+      count++;
+    });
+    const centerLng = count > 0 ? sumLng / count : 0;
+    const centerLat = count > 0 ? sumLat / count : 0;
+    
+    setMeasurementSegments(prev => [...prev, {
+      segments,
+      length,
+      center: [centerLng, centerLat]
+    }]);
+  }, []);
+
+  // Handle measurement unselect - remove measurement segments by index
+  const handleMeasurementUnselect = useCallback((indicesToRemove) => {
+    setMeasurementSegments(prev => prev.filter((_, idx) => !indicesToRemove.includes(idx)));
+  }, []);
+
+  // Undo function
+  const handleUndo = useCallback(() => {
+    if (history.length === 0) return;
+    
+    const lastState = history[history.length - 1];
+    
+    // Save current state to redo stack
+    setRedoStack(prev => [...prev, { completedLength, selectedBounds, selectedSegments: [...selectedSegments] }]);
+    
+    // Restore previous state
+    setCompletedLength(lastState.completedLength);
+    setSelectedBounds(lastState.selectedBounds);
+    setSelectedSegments(lastState.selectedSegments);
+    
+    // Remove last item from history
+    setHistory(prev => prev.slice(0, -1));
+  }, [history, completedLength, selectedBounds, selectedSegments]);
+
+  // Redo function
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    
+    const nextState = redoStack[redoStack.length - 1];
+    
+    // Save current state to history
+    setHistory(prev => [...prev, { completedLength, selectedBounds, selectedSegments: [...selectedSegments] }]);
+    
+    // Restore next state
+    setCompletedLength(nextState.completedLength);
+    setSelectedBounds(nextState.selectedBounds);
+    setSelectedSegments(nextState.selectedSegments);
+    
+    // Remove last item from redo stack
+    setRedoStack(prev => prev.slice(0, -1));
+  }, [redoStack, completedLength, selectedBounds, selectedSegments]);
+
+  // Keyboard shortcuts (Ctrl+Z for Undo, Ctrl+Y for Redo)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'z' || e.key === 'Z') {
+          e.preventDefault();
+          handleUndo();
+        } else if (e.key === 'y' || e.key === 'Y') {
+          e.preventDefault();
+          handleRedo();
         }
       }
-    });
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
+
+  // Create GeoJSON for selected (green) segments - shows only the actually selected portions
+  const selectedGeoJson = useCallback(() => {
+    if (selectedSegments.length === 0) return null;
     
-    if (selectedFeatures.length === 0) return null;
+    const selectedFeatures = selectedSegments.map(seg => ({
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "LineString",
+        coordinates: [seg.start, seg.end]
+      }
+    }));
     
     return {
       type: "FeatureCollection",
       features: selectedFeatures
     };
-  }, [geoJsonData.trenchLine, selectedBounds]);
+  }, [selectedSegments]);
+
+  // Create GeoJSON for measurement (yellow) segments
+  const measurementGeoJson = useCallback(() => {
+    if (measurementSegments.length === 0) return null;
+    
+    const measurementFeatures = [];
+    measurementSegments.forEach(measurement => {
+      measurement.segments.forEach(seg => {
+        measurementFeatures.push({
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "LineString",
+            coordinates: [seg.start, seg.end]
+          }
+        });
+      });
+    });
+    
+    return {
+      type: "FeatureCollection",
+      features: measurementFeatures
+    };
+  }, [measurementSegments]);
+
+  // Clear all measurements
+  const clearMeasurements = useCallback(() => {
+    setMeasurementSegments([]);
+  }, []);
 
   const greenLineStyle = () => ({
     color: '#00ff00',
     weight: 6,
     opacity: 1
   });
+
+  const yellowLineStyle = () => ({
+    color: '#FFA500',
+    weight: 6,
+    opacity: 1
+  });
+
+  // Create measurement label icon
+  const createMeasurementIcon = (length) => {
+    return new DivIcon({
+      html: `<div style="font-size: 14px; font-weight: bold; color: white; background: #FFA500; padding: 4px 8px; border-radius: 4px; border: 2px solid #cc8400; white-space: nowrap; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">${length.toFixed(1)} m</div>`,
+      className: 'measurement-label-icon',
+      iconSize: [80, 28],
+      iconAnchor: [40, 14]
+    });
+  };
 
   const onEachFeature = (feature, layer) => {
     if (feature.properties && feature.properties.text) {
@@ -402,6 +737,115 @@ export default function Map() {
         gap: "20px",
         alignItems: "center"
       }}>
+        {/* Mode Buttons */}
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button
+            onClick={() => setMode('marking')}
+            title="Marking Mode"
+            style={{
+              padding: "8px 16px",
+              border: "none",
+              borderRadius: "6px",
+              backgroundColor: mode === 'marking' ? "#00aa00" : "#f0f0f0",
+              color: mode === 'marking' ? "white" : "#333",
+              cursor: "pointer",
+              fontWeight: "bold",
+              transition: "background-color 0.2s"
+            }}
+          >
+            ✓ Marking
+          </button>
+          <button
+            onClick={() => setMode('measurement')}
+            title="Measurement Mode"
+            style={{
+              padding: "8px 16px",
+              border: "none",
+              borderRadius: "6px",
+              backgroundColor: mode === 'measurement' ? "#FFA500" : "#f0f0f0",
+              color: mode === 'measurement' ? "white" : "#333",
+              cursor: "pointer",
+              fontWeight: "bold",
+              transition: "background-color 0.2s"
+            }}
+          >
+            📏 Measurement
+          </button>
+          {mode === 'measurement' && measurementSegments.length > 0 && (
+            <button
+              onClick={clearMeasurements}
+              title="Clear Measurements"
+              style={{
+                padding: "8px 12px",
+                border: "none",
+                borderRadius: "6px",
+                backgroundColor: "#ff4444",
+                color: "white",
+                cursor: "pointer",
+                fontWeight: "bold",
+                transition: "background-color 0.2s"
+              }}
+            >
+              ✕ Clear
+            </button>
+          )}
+        </div>
+        
+        <div style={{ width: "1px", height: "40px", backgroundColor: "#ddd" }}></div>
+        
+        {/* Undo Button */}
+        <button
+          onClick={handleUndo}
+          disabled={history.length === 0}
+          title="Undo (Ctrl+Z)"
+          style={{
+            width: "36px",
+            height: "36px",
+            border: "none",
+            borderRadius: "6px",
+            backgroundColor: history.length === 0 ? "#e0e0e0" : "#f0f0f0",
+            cursor: history.length === 0 ? "not-allowed" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transition: "background-color 0.2s"
+          }}
+          onMouseEnter={(e) => { if (history.length > 0) e.target.style.backgroundColor = "#ddd"; }}
+          onMouseLeave={(e) => { if (history.length > 0) e.target.style.backgroundColor = "#f0f0f0"; }}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={history.length === 0 ? "#999" : "#333"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7v6h6"/>
+            <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>
+          </svg>
+        </button>
+        
+        {/* Redo Button */}
+        <button
+          onClick={handleRedo}
+          disabled={redoStack.length === 0}
+          title="Redo (Ctrl+Y)"
+          style={{
+            width: "36px",
+            height: "36px",
+            border: "none",
+            borderRadius: "6px",
+            backgroundColor: redoStack.length === 0 ? "#e0e0e0" : "#f0f0f0",
+            cursor: redoStack.length === 0 ? "not-allowed" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transition: "background-color 0.2s"
+          }}
+          onMouseEnter={(e) => { if (redoStack.length > 0) e.target.style.backgroundColor = "#ddd"; }}
+          onMouseLeave={(e) => { if (redoStack.length > 0) e.target.style.backgroundColor = "#f0f0f0"; }}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={redoStack.length === 0 ? "#999" : "#333"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 7v6h-6"/>
+            <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/>
+          </svg>
+        </button>
+        
+        <div style={{ width: "1px", height: "40px", backgroundColor: "#ddd" }}></div>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: "12px", color: "#666", marginBottom: "4px" }}>Total</div>
           <div style={{ fontWeight: "bold", fontSize: "16px" }}>{totalLength.toFixed(1)} m</div>
@@ -455,8 +899,18 @@ export default function Map() {
           }}></div>
           <span>Completed</span>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+          <div style={{
+            width: "30px",
+            height: "5px",
+            backgroundColor: "#FFA500",
+            borderRadius: "2px"
+          }}></div>
+          <span>Measurement</span>
+        </div>
         <div style={{ marginTop: "10px", fontSize: "12px", color: "#666" }}>
-          Drag selection box to measure
+          <div><b>Marking:</b> Left=Select, Right=Unselect</div>
+          <div><b>Measurement:</b> Left=Measure</div>
         </div>
       </div>
       <MapContainer
@@ -467,10 +921,17 @@ export default function Map() {
         zoomControl={false}
       >
         <SelectionBox 
+          mode={mode}
           onSelectionComplete={handleSelectionComplete}
+          onUnselectionComplete={handleUnselectionComplete}
+          onMeasurementComplete={handleMeasurementComplete}
+          onMeasurementUnselect={handleMeasurementUnselect}
           visibleLayersRef={visibleLayersRef}
           geoJsonData={geoJsonData}
           setSelectedBounds={setSelectedBounds}
+          selectedSegments={selectedSegments}
+          setSelectedSegments={setSelectedSegments}
+          measurementSegments={measurementSegments}
         />
         {geoJsonData.trench && (
           <GeoJSON
@@ -488,11 +949,26 @@ export default function Map() {
         )}
         {selectedGeoJson() && (
           <GeoJSON
-            key={`selected-${selectedBounds.length}`}
+            key={`selected-${selectedSegments.length}`}
             data={selectedGeoJson()}
             style={greenLineStyle}
           />
         )}
+        {measurementGeoJson() && (
+          <GeoJSON
+            key={`measurement-${measurementSegments.length}`}
+            data={measurementGeoJson()}
+            style={yellowLineStyle}
+          />
+        )}
+        {/* Measurement labels */}
+        {measurementSegments.map((measurement, index) => (
+          <Marker
+            key={`measurement-label-${index}`}
+            position={[measurement.center[1], measurement.center[0]]}
+            icon={createMeasurementIcon(measurement.length)}
+          />
+        ))}
         {geoJsonData.text && geoJsonData.text.features.map((feature, index) => {
           if (feature.geometry.type === 'Point' && feature.properties.text) {
             const [lng, lat] = feature.geometry.coordinates;
