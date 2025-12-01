@@ -545,6 +545,7 @@ export default function Map() {
   const [redoStack, setRedoStack] = useState([]); // For redo - stores undone states
   const [mode, setMode] = useState('marking'); // 'marking' or 'measurement'
   const [lastMarkedLength, setLastMarkedLength] = useState(0); // Track last marked length for auto-fill
+  const [showText, setShowText] = useState(true); // Toggle for text layer visibility
   const visibleLayersRef = useRef({});
   const mapRef = useRef(null);
   
@@ -859,7 +860,7 @@ export default function Map() {
   };
 
   const trenchLineStyle = useCallback((feature) => {
-    return { color: '#FFD700', weight: 5, opacity: 1 }; // Yellow
+    return { color: '#FFD700', weight: 5, opacity: 1 }; // Bright Yellow
   }, []);
 
   const createTextIcon = (text) => {
@@ -1110,6 +1111,25 @@ export default function Map() {
           <div><b>Marking:</b> Left=Select, Right=Unselect</div>
           <div><b>Measurement:</b> Left=Measure</div>
         </div>
+        <div style={{ marginTop: "10px", borderTop: "1px solid #ddd", paddingTop: "10px" }}>
+          <button
+            onClick={() => setShowText(!showText)}
+            title={showText ? "Hide Text Labels" : "Show Text Labels"}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: "none",
+              borderRadius: "6px",
+              backgroundColor: showText ? "#9b59b6" : "#f0f0f0",
+              color: showText ? "white" : "#333",
+              cursor: "pointer",
+              fontWeight: "bold",
+              transition: "background-color 0.2s"
+            }}
+          >
+            {showText ? "🔤 Text On" : "🔤 Text Off"}
+          </button>
+        </div>
       </div>
       <MapContainer
         whenCreated={(map) => { mapRef.current = map; }}
@@ -1183,7 +1203,7 @@ export default function Map() {
             />
           </React.Fragment>
         ))}
-        {geoJsonData.text && geoJsonData.text.features.map((feature, index) => {
+        {geoJsonData.text && showText && geoJsonData.text.features.map((feature, index) => {
           if (feature.geometry.type === 'Point' && feature.properties.text) {
             const [lng, lat] = feature.geometry.coordinates;
             return (
