@@ -1,9 +1,16 @@
 // src/components/Map.jsx
-import { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { MapContainer, GeoJSON, Marker, useMapEvents } from "react-leaflet";
 import { DivIcon } from "leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+
+// Import custom hooks and components
+import useDailyLog from "../hooks/useDailyLog";
+import useChartExport from "../hooks/useChartExport";
+import SubmitModal from "./SubmitModal";
+import ProgressStats from "./ProgressStats";
+import HistoryModal from "./HistoryModal";
 
 // Helper function to calculate distance between two coordinates in meters (Haversine formula)
 const calculateDistance = (coord1, coord2) => {
@@ -238,6 +245,69 @@ function SelectionBox({ mode, onSelectionComplete, onUnselectionComplete, onMeas
            isNear(sx2, sy2, x1, y1, x2, y2);
   };
 
+  // Check if a segment intersects with bounds (any part of segment is inside bounds)
+  const segmentIntersectsBounds = (segment, boundsObj) => {
+    // Try to clip the segment to bounds - if clipping succeeds, they intersect
+    const clipped = clipLineToBounds(segment.start, segment.end, boundsObj);
+    return clipped !== null;
+  };
+
+  // Clip a segment to bounds and return the clipped portion (if any)
+  const clipSegmentToBounds = (segment, boundsObj) => {
+    return clipLineToBounds(segment.start, segment.end, boundsObj);
+  };
+
+  // Subtract a clipped portion from a segment and return remaining parts
+  const subtractFromSegment = (segment, clippedStart, clippedEnd) => {
+    const epsilon = 0.0000001;
+    const [sx1, sy1] = segment.start;
+    const [sx2, sy2] = segment.end;
+    const [cx1, cy1] = clippedStart;
+    const [cx2, cy2] = clippedEnd;
+    
+    // Calculate parameter t for each point on the segment line
+    const dx = sx2 - sx1;
+    const dy = sy2 - sy1;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    
+    if (len < epsilon) return []; // Segment is a point
+    
+    // Project clipped points onto segment to get t values (0 to 1)
+    const getT = (px, py) => {
+      const t = ((px - sx1) * dx + (py - sy1) * dy) / (len * len);
+      return Math.max(0, Math.min(1, t));
+    };
+    
+    const t1 = getT(cx1, cy1);
+    const t2 = getT(cx2, cy2);
+    const tMin = Math.min(t1, t2);
+    const tMax = Math.max(t1, t2);
+    
+    const remainingParts = [];
+    
+    // Part before the clipped portion
+    if (tMin > epsilon) {
+      const endX = sx1 + tMin * dx;
+      const endY = sy1 + tMin * dy;
+      remainingParts.push({
+        start: [sx1, sy1],
+        end: [endX, endY]
+      });
+    }
+    
+    // Part after the clipped portion
+    if (tMax < 1 - epsilon) {
+      const startX = sx1 + tMax * dx;
+      const startY = sy1 + tMax * dy;
+      remainingParts.push({
+        start: [startX, startY],
+        end: [sx2, sy2]
+      });
+    }
+    
+    return remainingParts;
+  };
+
   const map = useMapEvents({
     mousedown: (e) => {
       // Left click = select/measure, Right click = unselect (works in both modes)
@@ -293,58 +363,80 @@ function SelectionBox({ mode, onSelectionComplete, onUnselectionComplete, onMeas
         };
         
         if (isUnselecting) {
-          // UNSELECT MODE - Remove both marking segments and measurement segments inside the box
+          // UNSELECT MODE - Treat the line as continuous, remove parts inside the box
+          // Directly clip each selected segment to the unselect bounds and remove that portion
           let totalLengthRemoved = 0;
-          const markingSegmentsToRemove = [];
-          const measurementIndicesToRemove = [];
+          const newSelectedSegments = [];
           
-          if (geoJsonData.trenchLine) {
-            geoJsonData.trenchLine.features.forEach((feature, featureIndex) => {
-              if (feature.properties && feature.properties.layer === "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR") {
-                const coords = feature.geometry.coordinates;
-                
-                for (let i = 0; i < coords.length - 1; i++) {
-                  const coord1 = coords[i];
-                  const coord2 = coords[i + 1];
-                  
-                  // Clip line to bounds
-                  const clipped = clipLineToBounds(coord1, coord2, boundsObj);
-                  
-                  if (clipped) {
-                    // Find and mark marking segments that overlap with this clipped portion
-                    selectedSegments.forEach((seg, idx) => {
-                      if (segmentsOverlap(clipped[0], clipped[1], seg)) {
-                        if (!markingSegmentsToRemove.includes(idx)) {
-                          markingSegmentsToRemove.push(idx);
-                          totalLengthRemoved += calculateDistance(seg.start, seg.end);
-                        }
-                      }
-                    });
-                    
-                    // Find and mark measurement segments that overlap with this clipped portion
-                    measurementSegments.forEach((measurement, mIdx) => {
-                      measurement.segments.forEach((seg) => {
-                        if (segmentsOverlap(clipped[0], clipped[1], seg)) {
-                          if (!measurementIndicesToRemove.includes(mIdx)) {
-                            measurementIndicesToRemove.push(mIdx);
-                          }
-                        }
-                      });
-                    });
-                  }
-                }
+          selectedSegments.forEach(seg => {
+            // Check if this segment has any portion inside the unselect box
+            const clipped = clipLineToBounds(seg.start, seg.end, boundsObj);
+            
+            if (clipped) {
+              // This segment has a portion inside the unselect box - remove it
+              const removedLength = calculateDistance(clipped[0], clipped[1]);
+              totalLengthRemoved += removedLength;
+              
+              // Get remaining parts (parts outside the box)
+              const remainingParts = subtractFromSegment(seg, clipped[0], clipped[1]);
+              newSelectedSegments.push(...remainingParts);
+            } else {
+              // Segment is completely outside the box, keep it
+              newSelectedSegments.push(seg);
+            }
+          });
+          
+          // Process measurement segments the same way
+          const newMeasurementSegments = [];
+          let measurementsModified = false;
+          
+          measurementSegments.forEach((measurement) => {
+            const remainingMeasurementSegs = [];
+            let modified = false;
+            
+            measurement.segments.forEach(seg => {
+              const clipped = clipLineToBounds(seg.start, seg.end, boundsObj);
+              
+              if (clipped) {
+                modified = true;
+                measurementsModified = true;
+                const remainingParts = subtractFromSegment(seg, clipped[0], clipped[1]);
+                remainingMeasurementSegs.push(...remainingParts);
+              } else {
+                remainingMeasurementSegs.push(seg);
               }
             });
+            
+            if (remainingMeasurementSegs.length > 0) {
+              // Calculate new length and center
+              let remainingLength = 0;
+              let sumLat = 0, sumLng = 0, count = 0;
+              remainingMeasurementSegs.forEach(seg => {
+                remainingLength += calculateDistance(seg.start, seg.end);
+                sumLng += (seg.start[0] + seg.end[0]) / 2;
+                sumLat += (seg.start[1] + seg.end[1]) / 2;
+                count++;
+              });
+              const centerLng = count > 0 ? sumLng / count : 0;
+              const centerLat = count > 0 ? sumLat / count : 0;
+              
+              newMeasurementSegments.push({
+                segments: remainingMeasurementSegs,
+                length: remainingLength,
+                center: [centerLng, centerLat]
+              });
+            }
+            // If no remaining segments, the measurement is completely removed
+          });
+          
+          // Update marking segments if any length was removed
+          if (totalLengthRemoved > 0) {
+            onUnselectionComplete(totalLengthRemoved, [], newSelectedSegments);
           }
           
-          // Remove marking segments
-          if (totalLengthRemoved > 0 && markingSegmentsToRemove.length > 0) {
-            onUnselectionComplete(totalLengthRemoved, markingSegmentsToRemove);
-          }
-          
-          // Remove measurement segments
-          if (measurementIndicesToRemove.length > 0) {
-            onMeasurementUnselect(measurementIndicesToRemove);
+          // Update measurement segments if any were modified
+          if (measurementsModified) {
+            onMeasurementUnselect(newMeasurementSegments);
           }
         } else if (mode === 'measurement') {
           // MEASUREMENT MODE - Just measure and display, don't add to completed
@@ -452,8 +544,17 @@ export default function Map() {
   const [history, setHistory] = useState([]); // For undo - stores previous states
   const [redoStack, setRedoStack] = useState([]); // For redo - stores undone states
   const [mode, setMode] = useState('marking'); // 'marking' or 'measurement'
+  const [lastMarkedLength, setLastMarkedLength] = useState(0); // Track last marked length for auto-fill
   const visibleLayersRef = useRef({});
   const mapRef = useRef(null);
+  
+  // Modal states
+  const [submitModalOpen, setSubmitModalOpen] = useState(false);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  
+  // Custom hooks for daily log and export
+  const { dailyLog, addRecord, deleteRecord, resetLog, updateRecord } = useDailyLog();
+  const { exportToExcel, isExporting } = useChartExport();
 
   useEffect(() => {
     // Load trench.geojson
@@ -507,6 +608,9 @@ export default function Map() {
     setHistory(prev => [...prev, { completedLength, selectedBounds, selectedSegments: [...selectedSegments] }]);
     setRedoStack([]); // Clear redo stack on new action
     
+    // Save the last marked length for auto-fill in submit modal
+    setLastMarkedLength(lengthInside);
+    
     setCompletedLength(prev => {
       const newCompleted = prev + lengthInside;
       // Don't exceed total length
@@ -514,14 +618,14 @@ export default function Map() {
     });
   }, [totalLength, completedLength, selectedBounds, selectedSegments]);
 
-  // Handle unselection - remove length from completed
-  const handleUnselectionComplete = useCallback((lengthRemoved, segmentIndicesToRemove) => {
+  // Handle unselection - remove only the selected portion, keep the rest
+  const handleUnselectionComplete = useCallback((lengthRemoved, segmentIndicesToRemove, newSegments) => {
     // Save current state to history before making changes
     setHistory(prev => [...prev, { completedLength, selectedBounds, selectedSegments: [...selectedSegments] }]);
     setRedoStack([]); // Clear redo stack on new action
     
-    // Remove segments by index
-    setSelectedSegments(prev => prev.filter((_, idx) => !segmentIndicesToRemove.includes(idx)));
+    // Replace segments with the new list (remaining parts after subtraction)
+    setSelectedSegments(newSegments);
     
     setCompletedLength(prev => {
       const newCompleted = prev - lengthRemoved;
@@ -530,28 +634,39 @@ export default function Map() {
     });
   }, [completedLength, selectedBounds, selectedSegments]);
 
-  // Handle measurement complete - show yellow overlay with length label
+  // Handle measurement complete - AutoCAD style dimension
+  // Each measurement is added to the list (accumulates)
   const handleMeasurementComplete = useCallback((length, segments, bounds) => {
-    // Calculate center of the measured segments for label placement
-    let sumLat = 0, sumLng = 0, count = 0;
-    segments.forEach(seg => {
-      sumLng += (seg.start[0] + seg.end[0]) / 2;
-      sumLat += (seg.start[1] + seg.end[1]) / 2;
-      count++;
-    });
-    const centerLng = count > 0 ? sumLng / count : 0;
-    const centerLat = count > 0 ? sumLat / count : 0;
+    if (segments.length === 0) return;
     
+    // Find the overall start and end points of the measurement
+    // (first point of first segment, last point of last segment)
+    const startPoint = segments[0].start;
+    const endPoint = segments[segments.length - 1].end;
+    
+    // Calculate center point for label
+    const centerLng = (startPoint[0] + endPoint[0]) / 2;
+    const centerLat = (startPoint[1] + endPoint[1]) / 2;
+    
+    // Calculate angle of the dimension line (from start to end)
+    const dx = endPoint[0] - startPoint[0];
+    const dy = endPoint[1] - startPoint[1];
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    
+    // Add new measurement to the list (keep all previous measurements)
     setMeasurementSegments(prev => [...prev, {
       segments,
       length,
-      center: [centerLng, centerLat]
+      center: [centerLng, centerLat],
+      startPoint,
+      endPoint,
+      angle
     }]);
   }, []);
 
-  // Handle measurement unselect - remove measurement segments by index
-  const handleMeasurementUnselect = useCallback((indicesToRemove) => {
-    setMeasurementSegments(prev => prev.filter((_, idx) => !indicesToRemove.includes(idx)));
+  // Handle measurement unselect - replace with new measurement segments list
+  const handleMeasurementUnselect = useCallback((newMeasurements) => {
+    setMeasurementSegments(newMeasurements);
   }, []);
 
   // Undo function
@@ -668,13 +783,51 @@ export default function Map() {
     opacity: 1
   });
 
-  // Create measurement label icon
-  const createMeasurementIcon = (length) => {
+  // Create AutoCAD-style dimension label icon (rotated to match line angle)
+  const createDimensionLabelIcon = (length, angle) => {
+    // Normalize angle to keep text readable (not upside down)
+    let displayAngle = angle;
+    if (displayAngle > 90) displayAngle -= 180;
+    if (displayAngle < -90) displayAngle += 180;
+    
     return new DivIcon({
-      html: `<div style="font-size: 14px; font-weight: bold; color: white; background: #FFA500; padding: 4px 8px; border-radius: 4px; border: 2px solid #cc8400; white-space: nowrap; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">${length.toFixed(1)} m</div>`,
-      className: 'measurement-label-icon',
-      iconSize: [80, 28],
-      iconAnchor: [40, 14]
+      html: `<div style="
+        font-size: 12px;
+        font-weight: bold;
+        color: #000;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 2px 8px;
+        border: 1px solid #FFA500;
+        white-space: nowrap;
+        transform: rotate(${displayAngle}deg);
+        transform-origin: center center;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      ">${length.toFixed(2)} m</div>`,
+      className: 'dimension-label-icon',
+      iconSize: [80, 20],
+      iconAnchor: [40, 10]
+    });
+  };
+
+  // Create arrow marker icon for dimension line endpoints
+  const createArrowIcon = (angle, isStart) => {
+    // Arrow points in the direction of the line
+    // For start point, arrow points toward end; for end point, arrow points toward start
+    const arrowAngle = isStart ? angle : angle + 180;
+    
+    return new DivIcon({
+      html: `<div style="
+        width: 0;
+        height: 0;
+        border-left: 8px solid transparent;
+        border-right: 8px solid transparent;
+        border-bottom: 12px solid #FFA500;
+        transform: rotate(${arrowAngle - 90}deg);
+        transform-origin: center center;
+      "></div>`,
+      className: 'dimension-arrow-icon',
+      iconSize: [16, 12],
+      iconAnchor: [8, 6]
     });
   };
 
@@ -771,24 +924,6 @@ export default function Map() {
           >
             📏 Measurement
           </button>
-          {mode === 'measurement' && measurementSegments.length > 0 && (
-            <button
-              onClick={clearMeasurements}
-              title="Clear Measurements"
-              style={{
-                padding: "8px 12px",
-                border: "none",
-                borderRadius: "6px",
-                backgroundColor: "#ff4444",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: "bold",
-                transition: "background-color 0.2s"
-              }}
-            >
-              ✕ Clear
-            </button>
-          )}
         </div>
         
         <div style={{ width: "1px", height: "40px", backgroundColor: "#ddd" }}></div>
@@ -843,6 +978,69 @@ export default function Map() {
             <path d="M21 7v6h-6"/>
             <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/>
           </svg>
+        </button>
+        
+        <div style={{ width: "1px", height: "40px", backgroundColor: "#ddd" }}></div>
+        
+        {/* Submit Button */}
+        <button
+          onClick={() => setSubmitModalOpen(true)}
+          title="Submit Daily Work"
+          style={{
+            padding: "8px 16px",
+            border: "none",
+            borderRadius: "6px",
+            backgroundColor: "#0066cc",
+            color: "white",
+            cursor: "pointer",
+            fontWeight: "bold",
+            transition: "background-color 0.2s"
+          }}
+          onMouseEnter={(e) => e.target.style.backgroundColor = "#0055aa"}
+          onMouseLeave={(e) => e.target.style.backgroundColor = "#0066cc"}
+        >
+          📝 Submit
+        </button>
+        
+        {/* History Button */}
+        <button
+          onClick={() => setHistoryModalOpen(true)}
+          title="View History"
+          style={{
+            padding: "8px 16px",
+            border: "none",
+            borderRadius: "6px",
+            backgroundColor: "#666",
+            color: "white",
+            cursor: "pointer",
+            fontWeight: "bold",
+            transition: "background-color 0.2s"
+          }}
+          onMouseEnter={(e) => e.target.style.backgroundColor = "#555"}
+          onMouseLeave={(e) => e.target.style.backgroundColor = "#666"}
+        >
+          📋 History
+        </button>
+        
+        {/* Export Button */}
+        <button
+          onClick={() => exportToExcel(dailyLog, totalLength)}
+          disabled={isExporting || dailyLog.length === 0}
+          title="Export to Excel"
+          style={{
+            padding: "8px 16px",
+            border: "none",
+            borderRadius: "6px",
+            backgroundColor: (isExporting || dailyLog.length === 0) ? "#ccc" : "#228B22",
+            color: "white",
+            cursor: (isExporting || dailyLog.length === 0) ? "not-allowed" : "pointer",
+            fontWeight: "bold",
+            transition: "background-color 0.2s"
+          }}
+          onMouseEnter={(e) => { if (!isExporting && dailyLog.length > 0) e.target.style.backgroundColor = "#1a6b1a"; }}
+          onMouseLeave={(e) => { if (!isExporting && dailyLog.length > 0) e.target.style.backgroundColor = "#228B22"; }}
+        >
+          {isExporting ? "⏳ Exporting..." : "📊 Export"}
         </button>
         
         <div style={{ width: "1px", height: "40px", backgroundColor: "#ddd" }}></div>
@@ -949,25 +1147,41 @@ export default function Map() {
         )}
         {selectedGeoJson() && (
           <GeoJSON
-            key={`selected-${selectedSegments.length}`}
+            key={`selected-${selectedSegments.length}-${completedLength}`}
             data={selectedGeoJson()}
             style={greenLineStyle}
           />
         )}
         {measurementGeoJson() && (
           <GeoJSON
-            key={`measurement-${measurementSegments.length}`}
+            key={`measurement-${measurementSegments.length}-${measurementSegments.reduce((acc, m) => acc + m.length, 0)}`}
             data={measurementGeoJson()}
             style={yellowLineStyle}
           />
         )}
-        {/* Measurement labels */}
+        {/* AutoCAD-style Dimension: Arrows at endpoints + centered label */}
         {measurementSegments.map((measurement, index) => (
-          <Marker
-            key={`measurement-label-${index}`}
-            position={[measurement.center[1], measurement.center[0]]}
-            icon={createMeasurementIcon(measurement.length)}
-          />
+          <React.Fragment key={`measurement-dim-${index}`}>
+            {/* Start arrow */}
+            {measurement.startPoint && (
+              <Marker
+                position={[measurement.startPoint[1], measurement.startPoint[0]]}
+                icon={createArrowIcon(measurement.angle || 0, true)}
+              />
+            )}
+            {/* End arrow */}
+            {measurement.endPoint && (
+              <Marker
+                position={[measurement.endPoint[1], measurement.endPoint[0]]}
+                icon={createArrowIcon(measurement.angle || 0, false)}
+              />
+            )}
+            {/* Centered dimension label */}
+            <Marker
+              position={[measurement.center[1], measurement.center[0]]}
+              icon={createDimensionLabelIcon(measurement.length, measurement.angle || 0)}
+            />
+          </React.Fragment>
         ))}
         {geoJsonData.text && geoJsonData.text.features.map((feature, index) => {
           if (feature.geometry.type === 'Point' && feature.properties.text) {
@@ -983,6 +1197,32 @@ export default function Map() {
           return null;
         })}
       </MapContainer>
+      
+      {/* Submit Modal */}
+      <SubmitModal
+        isOpen={submitModalOpen}
+        onClose={() => setSubmitModalOpen(false)}
+        onSubmit={(record) => {
+          addRecord(record);
+          setLastMarkedLength(0); // Reset after submission
+          setSubmitModalOpen(false);
+        }}
+        completedLength={completedLength}
+        totalLength={totalLength}
+        lastMarkedLength={lastMarkedLength}
+      />
+      
+      {/* History Modal */}
+      <HistoryModal
+        isOpen={historyModalOpen}
+        onClose={() => setHistoryModalOpen(false)}
+        dailyLog={dailyLog}
+        onDeleteRecord={deleteRecord}
+        onResetLog={resetLog}
+        onUpdateRecord={updateRecord}
+        onExport={() => exportToExcel(dailyLog, totalLength)}
+        isExporting={isExporting}
+      />
     </div>
   );
 }
