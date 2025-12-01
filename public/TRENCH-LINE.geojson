@@ -1,6 +1,6 @@
 {
 "type": "FeatureCollection",
-"name": "TRENHC line",
+"name": "TRENHC line2",
 "crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
 "features": [
 { "type": "Feature", "properties": { "fid": 3817, "handle": 52161, "block": -1, "etype": 18, "space": 0, "layer": "Base Zanjas MT_CIVIL_H$0$C-STRM-CNTR", "olinetype": "Base Zanjas MT_CIVIL_H$0$CENTER2", "linetype": "", "color": "255,255,1,255", "ocolor": 2, "color24": 16776961, "transparency": 0, "lweight": -3, "linewidth": 0.0, "ltscale": 1.0, "visible": 1, "width": 0.0, "thickness": 0.0, "ext": "(3:0,0,0.1)" }, "geometry": { "type": "LineString", "coordinates": [ [ -1.66784289862836, 52.688509495121146, 0.0 ], [ -1.667834714395203, 52.68859060771576, 0.0 ] ] } },
